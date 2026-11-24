@@ -1314,9 +1314,10 @@ func (h *jobsInsertHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	res, err := h.Handle(ctx, &jobsInsertRequest{
-		server:  server,
-		project: project,
-		job:     &job,
+		server:            server,
+		project:           project,
+		allowedPolicyTags: allowedPolicyTagsFromRequest(r),
+		job:               &job,
 	})
 	if err != nil {
 		// Preserve typed *ServerError (e.g. a 404 notFound for a missing
@@ -1334,9 +1335,10 @@ func (h *jobsInsertHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 type jobsInsertRequest struct {
-	server  *Server
-	project *metadata.Project
-	job     *bigqueryv2.Job
+	server            *Server
+	project           *metadata.Project
+	job               *bigqueryv2.Job
+	allowedPolicyTags map[string]bool
 }
 
 func (h *jobsInsertHandler) tableDefFromQueryResponse(tableID string, response *internaltypes.QueryResponse) (*types.Table, error) {
@@ -1752,6 +1754,9 @@ func (h *jobsInsertHandler) Handle(ctx context.Context, r *jobsInsertRequest) (*
 		return nil, err
 	}
 	if err := rejectPlainSnapshotDrop(ctx, r.server, query, queryProjectID, datasetID); err != nil {
+		return nil, err
+	}
+	if err := checkPolicyTags(r.project, query, r.allowedPolicyTags); err != nil {
 		return nil, err
 	}
 	conn, err := r.server.connMgr.Connection(ctx, queryProjectID, datasetID)
@@ -2211,10 +2216,16 @@ func (h *jobsQueryHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		server:            server,
 		project:           project,
 		queryRequest:      &req,
+		allowedPolicyTags: allowedPolicyTagsFromRequest(r),
 		useInt64Timestamp: useInt64Timestamp,
 	})
 	if err != nil {
-		errorResponse(ctx, w, errJobInternalError(err.Error()))
+		var serverErr *ServerError
+		if errors.As(err, &serverErr) {
+			errorResponse(ctx, w, serverErr)
+		} else {
+			errorResponse(ctx, w, errJobInternalError(err.Error()))
+		}
 		return
 	}
 	encodeResponse(ctx, w, res)
@@ -2225,6 +2236,7 @@ type jobsQueryRequest struct {
 	project           *metadata.Project
 	queryRequest      *bigqueryv2.QueryRequest
 	useInt64Timestamp bool
+	allowedPolicyTags map[string]bool
 }
 
 func (h *jobsQueryHandler) Handle(ctx context.Context, r *jobsQueryRequest) (*internaltypes.QueryResponse, error) {
@@ -2234,6 +2246,9 @@ func (h *jobsQueryHandler) Handle(ctx context.Context, r *jobsQueryRequest) (*in
 		return nil, err
 	}
 	if err := rejectPlainSnapshotDrop(ctx, r.server, query, queryProjectID, datasetID); err != nil {
+		return nil, err
+	}
+	if err := checkPolicyTags(r.project, query, r.allowedPolicyTags); err != nil {
 		return nil, err
 	}
 	conn, err := r.server.connMgr.Connection(ctx, queryProjectID, datasetID)

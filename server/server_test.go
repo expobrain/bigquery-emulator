@@ -4268,6 +4268,77 @@ func TestDryRunTimeTravelJobsInsert(t *testing.T) {
 	}
 }
 
+// TestPolicyTags covers #1: policy tags round-trip through table metadata and
+// reads of tagged columns are denied unless the caller supplies the tag.
+func TestPolicyTags(t *testing.T) {
+	const projectID = "test"
+	const tag = "projects/p/taxonomies/tax/policyTags/ssn"
+	ctx := context.Background()
+	bqServer, err := server.New(server.TempStorage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bqServer.Load(server.StructSource(types.NewProject(projectID, types.NewDataset("dataset1")))); err != nil {
+		t.Fatal(err)
+	}
+	testServer := bqServer.TestServer()
+	defer func() {
+		testServer.Close()
+		bqServer.Stop(ctx)
+	}()
+
+	code, resp := httpJSON(t, http.MethodPost,
+		testServer.URL+"/projects/test/datasets/dataset1/tables",
+		`{"tableReference":{"projectId":"test","datasetId":"dataset1","tableId":"tagged"},`+
+			`"schema":{"fields":[`+
+			`{"name":"id","type":"INT64","mode":"NULLABLE"},`+
+			`{"name":"ssn","type":"STRING","mode":"NULLABLE",`+
+			`"policyTags":{"names":["`+tag+`"]}}]}}`, nil)
+	if code != http.StatusOK {
+		t.Fatalf("create tagged table: %d (%v)", code, resp)
+	}
+	code, resp = httpJSON(t, http.MethodGet,
+		testServer.URL+"/projects/test/datasets/dataset1/tables/tagged", "", nil)
+	if code != http.StatusOK {
+		t.Fatalf("tables.get: %d (%v)", code, resp)
+	}
+	fields := resp["schema"].(map[string]any)["fields"].([]any)
+	gotTag := fields[1].(map[string]any)["policyTags"].(map[string]any)["names"].([]any)[0]
+	if gotTag != tag {
+		t.Fatalf("policy tag = %v, want %s", gotTag, tag)
+	}
+
+	query := func(sql string, headers map[string]string) (int, map[string]any) {
+		t.Helper()
+		body := `{"query":` + strconv.Quote(sql) + `,"useLegacySql":false}`
+		return httpJSON(t, http.MethodPost, testServer.URL+"/projects/test/queries", body, headers)
+	}
+	if code, resp := query("SELECT id FROM dataset1.tagged", nil); code != http.StatusOK {
+		t.Fatalf("untagged column query: %d (%v)", code, resp)
+	}
+	if code, resp := query("SELECT ssn FROM dataset1.tagged", nil); code != http.StatusForbidden {
+		t.Fatalf("tagged column query: got %d, want 403 (%v)", code, resp)
+	}
+	if code, resp := query("SELECT ssn FROM dataset1.tagged", map[string]string{
+		"X-BigQuery-Allowed-Policy-Tags": tag,
+	}); code != http.StatusOK {
+		t.Fatalf("tagged column query with header: %d (%v)", code, resp)
+	}
+
+	// The same denial applies to jobs.insert and to dry runs.
+	jobBody := `{"jobReference":{"projectId":"test","jobId":"policy_tag_job"},` +
+		`"configuration":{"query":{"query":"SELECT ssn FROM dataset1.tagged","useLegacySql":false}}}`
+	if code, resp := httpJSON(t, http.MethodPost,
+		testServer.URL+"/projects/test/jobs", jobBody, nil); code != http.StatusForbidden {
+		t.Fatalf("jobs.insert tagged column query: got %d, want 403 (%v)", code, resp)
+	}
+	dryBody := `{"query":"SELECT ssn FROM dataset1.tagged","useLegacySql":false,"dryRun":true}`
+	if code, resp := httpJSON(t, http.MethodPost,
+		testServer.URL+"/projects/test/queries", dryBody, nil); code != http.StatusForbidden {
+		t.Fatalf("dry run tagged column query: got %d, want 403 (%v)", code, resp)
+	}
+}
+
 func TestUploadCSVHonorsFieldDelimiter(t *testing.T) {
 	const (
 		projectID = "test"
