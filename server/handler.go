@@ -593,8 +593,11 @@ func (h *uploadContentHandler) Handle(ctx context.Context, r *uploadContentReque
 			project: r.project,
 			dataset: dataset,
 			table: &bigqueryv2.Table{
-				Schema:         load.Schema,
-				TableReference: tableRef,
+				Schema:            load.Schema,
+				TableReference:    tableRef,
+				Clustering:        load.Clustering,
+				TimePartitioning:  load.TimePartitioning,
+				RangePartitioning: load.RangePartitioning,
 			},
 		}); err != nil {
 			return err
