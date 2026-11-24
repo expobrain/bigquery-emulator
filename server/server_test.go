@@ -3702,6 +3702,63 @@ func TestMultipartJSONLoadReportsJobStatus(t *testing.T) {
 	}
 }
 
+// TestCDCLoadOptionsAreApplied covers #7: a CDC landing load sends a number
+// of load options together with clustering/time partitioning. The options must
+// be accepted and propagated to the created table's metadata.
+func TestCDCLoadOptionsAreApplied(t *testing.T) {
+	const (
+		projectID = "test"
+		datasetID = "dataset1"
+	)
+	ctx := context.Background()
+	bqServer, err := server.New(server.TempStorage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bqServer.Load(server.StructSource(
+		types.NewProject(projectID, types.NewDataset(datasetID)),
+	)); err != nil {
+		t.Fatal(err)
+	}
+	testServer := bqServer.TestServer()
+	defer func() {
+		testServer.Close()
+		bqServer.Stop(ctx)
+	}()
+
+	jobJSON := `{"jobReference":{"projectId":"test","jobId":"cdc_landing"},` +
+		`"configuration":{"load":{"sourceFormat":"NEWLINE_DELIMITED_JSON",` +
+		`"jsonExtension":"ndjson","ignoreUnknownValues":true,` +
+		`"maxBadRecords":10,"decimalTargetTypes":["NUMERIC","BIGNUMERIC","STRING"],` +
+		`"schemaUpdateOptions":["ALLOW_FIELD_ADDITION"],` +
+		`"createDisposition":"CREATE_IF_NEEDED","writeDisposition":"WRITE_APPEND",` +
+		`"clustering":{"fields":["id"]},` +
+		`"timePartitioning":{"type":"DAY","field":"ts"},` +
+		`"destinationTable":{"projectId":"test","datasetId":"dataset1","tableId":"cdc_landing"},` +
+		`"schema":{"fields":[{"name":"id","type":"INT64"},{"name":"ts","type":"TIMESTAMP"}]}}}}`
+	contentType, body := multipartUpload(jobJSON, `{"id":1,"ts":"2024-01-01T00:00:00Z"}`+"\n")
+	code, resp := httpJSON(t, http.MethodPost,
+		testServer.URL+"/upload/bigquery/v2/projects/test/jobs?uploadType=multipart",
+		body, map[string]string{"Content-Type": contentType})
+	if code != http.StatusOK {
+		t.Fatalf("CDC landing load: expected 200, got %d (%v)", code, resp)
+	}
+
+	code, resp = httpJSON(t, http.MethodGet,
+		testServer.URL+"/projects/test/datasets/dataset1/tables/cdc_landing", "", nil)
+	if code != http.StatusOK {
+		t.Fatalf("tables.get: %d (%v)", code, resp)
+	}
+	clustering, ok := resp["clustering"].(map[string]any)
+	if !ok || !cmp.Equal(clustering["fields"], []any{"id"}) {
+		t.Fatalf("clustering was not propagated to the created table: %v", resp["clustering"])
+	}
+	partitioning, ok := resp["timePartitioning"].(map[string]any)
+	if !ok || partitioning["type"] != "DAY" || partitioning["field"] != "ts" {
+		t.Fatalf("timePartitioning was not propagated to the created table: %v", resp["timePartitioning"])
+	}
+}
+
 func TestUploadCSVHonorsFieldDelimiter(t *testing.T) {
 	const (
 		projectID = "test"
