@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 
 	bigqueryv2 "google.golang.org/api/bigquery/v2"
 
@@ -36,10 +37,20 @@ func allowedPolicyTagsFromRequest(r *http.Request) map[string]bool {
 	return allowed
 }
 
+// identifierPatterns caches the compiled expression for each column name.
+// Column names are stable for the life of a table, so compiling them once
+// avoids rebuilding a regexp for every field of every query.
+var identifierPatterns sync.Map // map[string]*regexp.Regexp
+
 // identifierPattern matches a column name as a standalone word so that
 // `ssn` is not considered read by a column named `ssn_hash`.
 func identifierPattern(name string) *regexp.Regexp {
-	return regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9_])` + regexp.QuoteMeta(name) + `(?:$|[^A-Za-z0-9_])`)
+	if cached, ok := identifierPatterns.Load(name); ok {
+		return cached.(*regexp.Regexp)
+	}
+	pattern := regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9_])` + regexp.QuoteMeta(name) + `(?:$|[^A-Za-z0-9_])`)
+	actual, _ := identifierPatterns.LoadOrStore(name, pattern)
+	return actual.(*regexp.Regexp)
 }
 
 // checkPolicyTags rejects reads of columns whose policy tags are not allowed
@@ -73,11 +84,12 @@ func checkFieldPolicyTags(field *bigqueryv2.TableFieldSchema, query string, allo
 		return nil
 	}
 	if field.PolicyTags != nil {
+		pattern := identifierPattern(field.Name)
 		for _, tag := range field.PolicyTags.Names {
 			if allowed[tag] {
 				continue
 			}
-			if identifierPattern(field.Name).MatchString(query) {
+			if pattern.MatchString(query) {
 				return errAccessDenied("access denied to policy protected column " + field.Name)
 			}
 		}
