@@ -279,6 +279,10 @@ func (h *uploadHandler) serveMultipart(w http.ResponseWriter, r *http.Request) {
 		uploadErrorResponse(ctx, w, err)
 		return
 	}
+	// The Python client's load_table_from_json uses this small multipart path
+	// and reads the job status from the response. Report the completed load
+	// the same way the resumable upload path does.
+	uploadJob.Content().Status = &bigqueryv2.JobStatus{State: "DONE"}
 	encodeResponse(ctx, w, uploadJob.Content())
 }
 

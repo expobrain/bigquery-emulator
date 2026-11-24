@@ -3645,6 +3645,63 @@ func TestUploadWithoutJobReference(t *testing.T) {
 	}
 }
 
+// TestMultipartJSONLoadReportsJobStatus covers #6: the official Python client
+// uses small multipart uploads for load_table_from_json and expects the job in
+// the response to carry a terminal status. Without it the client reports
+// "400 unspecified job configuration query".
+func TestMultipartJSONLoadReportsJobStatus(t *testing.T) {
+	const (
+		projectID = "test"
+		datasetID = "dataset1"
+	)
+	ctx := context.Background()
+	bqServer, err := server.New(server.TempStorage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bqServer.Load(server.StructSource(
+		types.NewProject(projectID, types.NewDataset(datasetID)),
+	)); err != nil {
+		t.Fatal(err)
+	}
+	testServer := bqServer.TestServer()
+	defer func() {
+		testServer.Close()
+		bqServer.Stop(ctx)
+	}()
+
+	// Fields such as jsonExtension / ignoreUnknownValues / schemaUpdateOptions
+	// are sent by the Python client and must not be rejected.
+	jobJSON := `{"jobReference":{"projectId":"test","jobId":"python_json_load"},` +
+		`"configuration":{"load":{"sourceFormat":"NEWLINE_DELIMITED_JSON",` +
+		`"jsonExtension":"ndjson","ignoreUnknownValues":true,` +
+		`"schemaUpdateOptions":["ALLOW_FIELD_ADDITION"],` +
+		`"destinationTable":{"projectId":"test","datasetId":"dataset1","tableId":"json_load"},` +
+		`"schema":{"fields":[{"name":"a","type":"INT64"},{"name":"b","type":"STRING"}]}}}}`
+	contentType, body := multipartUpload(jobJSON, `{"a":1,"b":"x"}`+"\n"+`{"a":2,"b":"y"}`)
+	code, resp := httpJSON(t, http.MethodPost,
+		testServer.URL+"/upload/bigquery/v2/projects/test/jobs?uploadType=multipart",
+		body, map[string]string{"Content-Type": contentType})
+	if code != http.StatusOK {
+		t.Fatalf("multipart JSON load: expected 200, got %d (%v)", code, resp)
+	}
+	status, ok := resp["status"].(map[string]any)
+	if !ok || status["state"] != "DONE" {
+		t.Fatalf("multipart upload response must report a DONE job status, got %v", resp["status"])
+	}
+
+	code, resp = httpJSON(t, http.MethodPost,
+		testServer.URL+"/projects/test/queries",
+		`{"query":"SELECT a, b FROM dataset1.json_load ORDER BY a","useLegacySql":false}`, nil)
+	if code != http.StatusOK {
+		t.Fatalf("query JSON-loaded table: %d (%v)", code, resp)
+	}
+	want := [][]string{{"1", "x"}, {"2", "y"}}
+	if diff := cmp.Diff(want, queryRows(t, resp)); diff != "" {
+		t.Fatalf("JSON load rows mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestUploadCSVHonorsFieldDelimiter(t *testing.T) {
 	const (
 		projectID = "test"
