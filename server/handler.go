@@ -1747,7 +1747,7 @@ func (h *jobsInsertHandler) Handle(ctx context.Context, r *jobsInsertRequest) (*
 		return nil, fmt.Errorf("unspecified job configuration query")
 	}
 	queryProjectID, datasetID := queryProjectAndDataset(job.Configuration.Query.DefaultDataset, r.project.ID)
-	query, err := applyTimeTravel(ctx, r.server, job.Configuration.Query.Query, queryProjectID, datasetID)
+	query, err := applyTimeTravel(ctx, r.server, job.Configuration.Query.Query, queryProjectID, datasetID, job.Configuration.DryRun)
 	if err != nil {
 		return nil, err
 	}
@@ -1862,6 +1862,11 @@ func (h *jobsInsertHandler) Handle(ctx context.Context, r *jobsInsertRequest) (*
 		StartTime:           startTime.Unix(),
 		EndTime:             endTime.Unix(),
 		TotalBytesProcessed: totalBytes,
+	}
+	if response != nil {
+		// Dry runs report the result schema here rather than through
+		// query results, which are never materialised.
+		job.Statistics.Query.Schema = response.Schema
 	}
 	if err := r.project.AddJob(
 		ctx,
@@ -2224,7 +2229,7 @@ type jobsQueryRequest struct {
 
 func (h *jobsQueryHandler) Handle(ctx context.Context, r *jobsQueryRequest) (*internaltypes.QueryResponse, error) {
 	queryProjectID, datasetID := queryProjectAndDataset(r.queryRequest.DefaultDataset, r.project.ID)
-	query, err := applyTimeTravel(ctx, r.server, r.queryRequest.Query, queryProjectID, datasetID)
+	query, err := applyTimeTravel(ctx, r.server, r.queryRequest.Query, queryProjectID, datasetID, r.queryRequest.DryRun)
 	if err != nil {
 		return nil, err
 	}

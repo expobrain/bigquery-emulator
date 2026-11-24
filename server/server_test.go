@@ -4142,6 +4142,132 @@ func TestTimeTravelQuery(t *testing.T) {
 	}
 }
 
+// TestDryRunTimeTravelQuery covers #5: a dry run of a time-travel query
+// reports a schema and persists no job.
+func TestDryRunTimeTravelQuery(t *testing.T) {
+	const projectID = "test"
+	ctx := context.Background()
+	bqServer, err := server.New(server.TempStorage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bqServer.Load(server.StructSource(types.NewProject(projectID,
+		types.NewDataset("dataset1",
+			types.NewTable("source",
+				[]*types.Column{types.NewColumn("id", types.INT64)},
+				types.Data{{"id": 1}},
+			),
+		),
+	))); err != nil {
+		t.Fatal(err)
+	}
+	testServer := bqServer.TestServer()
+	defer func() {
+		testServer.Close()
+		bqServer.Stop(ctx)
+	}()
+
+	query := func(body string) (int, map[string]any) {
+		t.Helper()
+		return httpJSON(t, http.MethodPost, testServer.URL+"/projects/test/queries", body, nil)
+	}
+	code, resp := query(`{"query":"CREATE SNAPSHOT TABLE dataset1.snap CLONE dataset1.source","useLegacySql":false}`)
+	if code != http.StatusOK {
+		t.Fatalf("create snapshot: %d (%v)", code, resp)
+	}
+	code, meta := httpJSON(t, http.MethodGet,
+		testServer.URL+"/projects/test/datasets/dataset1/tables/snap", "", nil)
+	if code != http.StatusOK {
+		t.Fatalf("tables.get snapshot: %d (%v)", code, meta)
+	}
+	snapshotTime := meta["snapshotDefinition"].(map[string]any)["snapshotTime"].(string)
+	sql := "SELECT id FROM dataset1.source FOR SYSTEM_TIME AS OF TIMESTAMP('" + snapshotTime + "')"
+	body := `{"query":` + strconv.Quote(sql) + `,"useLegacySql":false,"dryRun":true}`
+	code, resp = query(body)
+	if code != http.StatusOK {
+		t.Fatalf("dry run: %d (%v)", code, resp)
+	}
+	schema, ok := resp["schema"].(map[string]any)
+	if !ok || len(schema["fields"].([]any)) == 0 {
+		t.Fatalf("dry run returned no schema: %v", resp["schema"])
+	}
+	jobRef, _ := resp["jobReference"].(map[string]any)
+	if jobRef == nil {
+		t.Fatalf("dry run returned no jobReference: %v", resp)
+	}
+	code, _ = httpJSON(t, http.MethodGet,
+		testServer.URL+"/projects/test/jobs/"+jobRef["jobId"].(string), "", nil)
+	if code != http.StatusNotFound {
+		t.Fatalf("dry run persisted a job: GET returned %d", code)
+	}
+}
+
+// TestDryRunTimeTravelJobsInsert covers #5 on the jobs.insert path.
+func TestDryRunTimeTravelJobsInsert(t *testing.T) {
+	const projectID = "test"
+	ctx := context.Background()
+	bqServer, err := server.New(server.TempStorage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bqServer.Load(server.StructSource(types.NewProject(projectID,
+		types.NewDataset("dataset1",
+			types.NewTable("source",
+				[]*types.Column{types.NewColumn("id", types.INT64)},
+				types.Data{{"id": 1}},
+			),
+		),
+	))); err != nil {
+		t.Fatal(err)
+	}
+	testServer := bqServer.TestServer()
+	defer func() {
+		testServer.Close()
+		bqServer.Stop(ctx)
+	}()
+
+	listTables := func() int {
+		t.Helper()
+		code, resp := httpJSON(t, http.MethodGet,
+			testServer.URL+"/projects/test/datasets/dataset1/tables", "", nil)
+		if code != http.StatusOK {
+			t.Fatalf("list tables: %d (%v)", code, resp)
+		}
+		tables, _ := resp["tables"].([]any)
+		return len(tables)
+	}
+	tablesBefore := listTables()
+
+	sql := "SELECT id FROM dataset1.source FOR SYSTEM_TIME AS OF TIMESTAMP('2026-01-01T00:00:00Z')"
+	body := `{"jobReference":{"projectId":"test","jobId":"dry_run_time_travel"},` +
+		`"configuration":{"dryRun":true,"query":{"query":` + strconv.Quote(sql) + `,"useLegacySql":false}}}`
+	code, resp := httpJSON(t, http.MethodPost, testServer.URL+"/projects/test/jobs", body, nil)
+	if code != http.StatusOK {
+		t.Fatalf("jobs.insert dry run: %d (%v)", code, resp)
+	}
+	stats, ok := resp["statistics"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing statistics: %v", resp)
+	}
+	queryStats, ok := stats["query"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing query statistics: %v", stats)
+	}
+	schema, ok := queryStats["schema"].(map[string]any)
+	if !ok || len(schema["fields"].([]any)) == 0 {
+		t.Fatalf("dry run returned no schema: %v", queryStats["schema"])
+	}
+	jobRef := resp["jobReference"].(map[string]any)
+	code, _ = httpJSON(t, http.MethodGet,
+		testServer.URL+"/projects/test/jobs/"+jobRef["jobId"].(string), "", nil)
+	if code != http.StatusNotFound {
+		t.Fatalf("dry run persisted a job: GET returned %d", code)
+	}
+	if got := listTables(); got != tablesBefore {
+		t.Fatalf("dry run changed table count: %d -> %d", tablesBefore, got)
+	}
+}
+
 func TestUploadCSVHonorsFieldDelimiter(t *testing.T) {
 	const (
 		projectID = "test"
