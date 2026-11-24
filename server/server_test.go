@@ -3821,6 +3821,50 @@ func TestNumericQueryParameter(t *testing.T) {
 	})
 }
 
+// TestInformationSchemaTablesCreationTimeIsTimestamp covers #9:
+// creation_time must be typed TIMESTAMP so it can be compared with a
+// timestamp literal.
+func TestInformationSchemaTablesCreationTimeIsTimestamp(t *testing.T) {
+	const projectID = "test"
+	ctx := context.Background()
+	bqServer, err := server.New(server.TempStorage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bqServer.Load(server.StructSource(
+		types.NewProject(projectID, types.NewDataset("dataset1",
+			types.NewTable("tbl_a", []*types.Column{types.NewColumn("a", types.INT64)}, nil))),
+	)); err != nil {
+		t.Fatal(err)
+	}
+	testServer := bqServer.TestServer()
+	defer func() {
+		testServer.Close()
+		bqServer.Stop(ctx)
+	}()
+
+	code, resp := httpJSON(t, http.MethodPost,
+		testServer.URL+"/projects/test/queries",
+		`{"query":"SELECT table_name, creation_time FROM test.dataset1.INFORMATION_SCHEMA.TABLES WHERE creation_time > TIMESTAMP('2020-01-01')","useLegacySql":false}`, nil)
+	if code != http.StatusOK {
+		t.Fatalf("creation_time query: %d (%v)", code, resp)
+	}
+	fields, ok := resp["schema"].(map[string]any)["fields"].([]any)
+	if !ok {
+		t.Fatalf("missing result schema: %v", resp["schema"])
+	}
+	for _, f := range fields {
+		field := f.(map[string]any)
+		if field["name"] == "creation_time" && field["type"] != "TIMESTAMP" {
+			t.Fatalf("creation_time type = %v, want TIMESTAMP", field["type"])
+		}
+	}
+	rows := queryRows(t, resp)
+	if len(rows) == 0 || rows[0][0] != "tbl_a" {
+		t.Fatalf("expected tbl_a in result rows, got %v", rows)
+	}
+}
+
 func TestUploadCSVHonorsFieldDelimiter(t *testing.T) {
 	const (
 		projectID = "test"

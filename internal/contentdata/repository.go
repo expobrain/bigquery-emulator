@@ -264,9 +264,60 @@ func isParameterNameChar(c byte) bool {
 	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_'
 }
 
+// applyInformationSchemaTimestampCasts works around googlesqlite modelling
+// INFORMATION_SCHEMA.TABLES.creation_time as STRING. BigQuery exposes it as
+// TIMESTAMP, so cast the column wherever a query reads it, which both types
+// the result schema and makes timestamp comparisons work.
+func applyInformationSchemaTimestampCasts(query string) string {
+	if !strings.Contains(strings.ToLower(query), "information_schema.tables") {
+		return query
+	}
+	var b strings.Builder
+	var quote byte
+	escaped := false
+	for i := 0; i < len(query); i++ {
+		c := query[i]
+		if quote != 0 {
+			b.WriteByte(c)
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == quote:
+				quote = 0
+			}
+			continue
+		}
+		if c == '\'' || c == '"' || c == '`' {
+			quote = c
+			b.WriteByte(c)
+			continue
+		}
+		if isIdentStart(c) {
+			j := i + 1
+			for j < len(query) && isParameterNameChar(query[j]) {
+				j++
+			}
+			if strings.EqualFold(query[i:j], "creation_time") {
+				b.WriteString("CAST(" + query[i:j] + " AS TIMESTAMP)")
+				i = j - 1
+				continue
+			}
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
+func isIdentStart(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_'
+}
+
 func (r *Repository) Query(ctx context.Context, tx *connection.Tx, projectID, datasetID, query string, params []*bigqueryv2.QueryParameter) (*internaltypes.QueryResponse, error) {
 	tx.SetProjectAndDataset(projectID, datasetID)
 	query = applyDeclaredNumericParameterTypes(query, params)
+	query = applyInformationSchemaTimestampCasts(query)
 	if err := tx.ContentRepoMode(); err != nil {
 		return nil, err
 	}
