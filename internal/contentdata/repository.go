@@ -316,7 +316,7 @@ func isIdentStart(c byte) bool {
 
 func (r *Repository) Query(ctx context.Context, tx *connection.Tx, projectID, datasetID, query string, params []*bigqueryv2.QueryParameter) (*internaltypes.QueryResponse, error) {
 	tx.SetProjectAndDataset(projectID, datasetID)
-	query, tableDefinition := rewriteCreateSnapshotTable(query, projectID, datasetID)
+	query, tableDefinition := rewriteCloneDDL(query, projectID, datasetID)
 	query = applyDeclaredNumericParameterTypes(query, params)
 	query = applyInformationSchemaTimestampCasts(query)
 	if err := tx.ContentRepoMode(); err != nil {

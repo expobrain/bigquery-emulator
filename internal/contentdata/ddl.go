@@ -9,8 +9,13 @@ import (
 	internaltypes "github.com/goccy/bigquery-emulator/internal/types"
 )
 
-var createSnapshotTablePattern = regexp.MustCompile(
-	`(?is)^\s*CREATE\s+SNAPSHOT\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([^\s]+)\s+CLONE\s+([^\s]+)\s*;?\s*$`,
+var (
+	createSnapshotTablePattern = regexp.MustCompile(
+		`(?is)^\s*CREATE\s+SNAPSHOT\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([^\s]+)\s+CLONE\s+([^\s]+)\s*;?\s*$`,
+	)
+	createCloneTablePattern = regexp.MustCompile(
+		`(?is)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([^\s]+)\s+CLONE\s+([^\s]+)\s*;?\s*$`,
+	)
 )
 
 // splitTableReference resolves a (possibly qualified) table reference against
@@ -31,13 +36,19 @@ func splitTableReference(ref, defaultProject, defaultDataset string) (projectID,
 	}
 }
 
-// rewriteCreateSnapshotTable converts a BigQuery CREATE SNAPSHOT TABLE ...
-// CLONE statement into an equivalent CREATE TABLE ... AS SELECT. The
-// materialised copy keeps the snapshot stable when the source is later
-// modified or dropped. The returned definition is applied to the table
-// metadata by the handler after the catalog has been synchronised.
-func rewriteCreateSnapshotTable(query, defaultProject, defaultDataset string) (string, *internaltypes.TableDefinition) {
+// rewriteCloneDDL converts BigQuery's CLONE DDL statements into an equivalent
+// CREATE TABLE ... AS SELECT. The materialised copy keeps the resulting table
+// stable when the source is later modified or dropped. The returned definition
+// is applied to the table metadata by the handler after the catalog has been
+// synchronised. Snapshots carry a SNAPSHOT kind (and table type); ordinary
+// clones stay typed TABLE and only add a cloneDefinition.
+func rewriteCloneDDL(query, defaultProject, defaultDataset string) (string, *internaltypes.TableDefinition) {
 	match := createSnapshotTablePattern.FindStringSubmatch(query)
+	kind := "SNAPSHOT"
+	if match == nil {
+		match = createCloneTablePattern.FindStringSubmatch(query)
+		kind = "CLONE"
+	}
 	if match == nil {
 		return query, nil
 	}
@@ -45,7 +56,7 @@ func rewriteCreateSnapshotTable(query, defaultProject, defaultDataset string) (s
 	projectID, datasetID, tableID := splitTableReference(destRef, defaultProject, defaultDataset)
 	baseProjectID, baseDatasetID, baseTableID := splitTableReference(sourceRef, defaultProject, defaultDataset)
 	return fmt.Sprintf("CREATE TABLE %s AS SELECT * FROM %s", destRef, sourceRef), &internaltypes.TableDefinition{
-		Kind:           "SNAPSHOT",
+		Kind:           kind,
 		ProjectID:      projectID,
 		DatasetID:      datasetID,
 		TableID:        tableID,
