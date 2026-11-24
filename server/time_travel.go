@@ -28,7 +28,7 @@ var timeTravelPattern = regexp.MustCompile(
 
 // applyTimeTravel rewrites FOR SYSTEM_TIME AS OF clauses to read from the
 // retained snapshot that was closest to (but not after) the requested time.
-func applyTimeTravel(ctx context.Context, server *Server, query, defaultProject, defaultDataset string) (string, error) {
+func applyTimeTravel(ctx context.Context, server *Server, query, defaultProject, defaultDataset string, dryRun bool) (string, error) {
 	if !strings.Contains(strings.ToUpper(query), "FOR SYSTEM_TIME AS OF") {
 		return query, nil
 	}
@@ -60,11 +60,20 @@ func applyTimeTravel(ctx context.Context, server *Server, query, defaultProject,
 			return match
 		}
 		if maxHours := int64(dataset.Content().MaxTimeTravelHours); maxHours > 0 && asOf.Before(time.Now().Add(-time.Duration(maxHours)*time.Hour)) {
+			if dryRun {
+				return groups[1] + groups[2]
+			}
 			rewriteErr = errInvalidQuery(fmt.Sprintf("requested time is older than the %d hour retention window", maxHours))
 			return match
 		}
 		snapshotID, ok := nearestSnapshot(dataset, projectID, datasetID, tableID, asOf)
 		if !ok {
+			if dryRun {
+				// A dry run still reports the schema the query would
+				// produce. The column schema does not change over time in
+				// this model, so the current table is a valid stand-in.
+				return groups[1] + groups[2]
+			}
 			rewriteErr = errInvalidQuery(fmt.Sprintf("no retained snapshot of %s.%s at or before %s", datasetID, tableID, asOf.Format(time.RFC3339Nano)))
 			return match
 		}
