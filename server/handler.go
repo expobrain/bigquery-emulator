@@ -1747,7 +1747,11 @@ func (h *jobsInsertHandler) Handle(ctx context.Context, r *jobsInsertRequest) (*
 		return nil, fmt.Errorf("unspecified job configuration query")
 	}
 	queryProjectID, datasetID := queryProjectAndDataset(job.Configuration.Query.DefaultDataset, r.project.ID)
-	if err := rejectPlainSnapshotDrop(ctx, r.server, job.Configuration.Query.Query, queryProjectID, datasetID); err != nil {
+	query, err := applyTimeTravel(ctx, r.server, job.Configuration.Query.Query, queryProjectID, datasetID)
+	if err != nil {
+		return nil, err
+	}
+	if err := rejectPlainSnapshotDrop(ctx, r.server, query, queryProjectID, datasetID); err != nil {
 		return nil, err
 	}
 	conn, err := r.server.connMgr.Connection(ctx, queryProjectID, datasetID)
@@ -1766,7 +1770,7 @@ func (h *jobsInsertHandler) Handle(ctx context.Context, r *jobsInsertRequest) (*
 		tx,
 		queryProjectID,
 		datasetID,
-		job.Configuration.Query.Query,
+		query,
 		job.Configuration.Query.QueryParameters,
 	)
 	endTime := time.Now()
@@ -2220,7 +2224,11 @@ type jobsQueryRequest struct {
 
 func (h *jobsQueryHandler) Handle(ctx context.Context, r *jobsQueryRequest) (*internaltypes.QueryResponse, error) {
 	queryProjectID, datasetID := queryProjectAndDataset(r.queryRequest.DefaultDataset, r.project.ID)
-	if err := rejectPlainSnapshotDrop(ctx, r.server, r.queryRequest.Query, queryProjectID, datasetID); err != nil {
+	query, err := applyTimeTravel(ctx, r.server, r.queryRequest.Query, queryProjectID, datasetID)
+	if err != nil {
+		return nil, err
+	}
+	if err := rejectPlainSnapshotDrop(ctx, r.server, query, queryProjectID, datasetID); err != nil {
 		return nil, err
 	}
 	conn, err := r.server.connMgr.Connection(ctx, queryProjectID, datasetID)
@@ -2238,7 +2246,7 @@ func (h *jobsQueryHandler) Handle(ctx context.Context, r *jobsQueryRequest) (*in
 		tx,
 		queryProjectID,
 		datasetID,
-		r.queryRequest.Query,
+		query,
 		r.queryRequest.QueryParameters,
 	)
 	if queryErr != nil {
