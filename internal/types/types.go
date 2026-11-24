@@ -22,13 +22,28 @@ type (
 	}
 
 	QueryResponse struct {
-		JobReference   *bigqueryv2.JobReference   `json:"jobReference"`
-		Schema         *bigqueryv2.TableSchema    `json:"schema"`
-		Rows           []*TableRow                `json:"rows"`
-		TotalRows      uint64                     `json:"totalRows,string"`
-		JobComplete    bool                       `json:"jobComplete"`
-		TotalBytes     int64                      `json:"-"`
-		ChangedCatalog *googlesqlite.ChangedCatalog `json:"-"`
+		JobReference    *bigqueryv2.JobReference     `json:"jobReference"`
+		Schema          *bigqueryv2.TableSchema      `json:"schema"`
+		Rows            []*TableRow                  `json:"rows"`
+		TotalRows       uint64                       `json:"totalRows,string"`
+		JobComplete     bool                         `json:"jobComplete"`
+		TotalBytes      int64                        `json:"-"`
+		ChangedCatalog  *googlesqlite.ChangedCatalog `json:"-"`
+		TableDefinition *TableDefinition             `json:"-"`
+	}
+
+	// TableDefinition carries table metadata produced by a rewritten DDL
+	// statement (snapshots, clones) from the content repository back to the
+	// handler, which owns the metadata repository.
+	TableDefinition struct {
+		Kind           string
+		ProjectID      string
+		DatasetID      string
+		TableID        string
+		BaseProjectID  string
+		BaseDatasetID  string
+		BaseTableID    string
+		DefinitionTime time.Time
 	}
 
 	TableDataList struct {

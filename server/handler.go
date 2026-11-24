@@ -1874,8 +1874,13 @@ func (h *jobsInsertHandler) Handle(ctx context.Context, r *jobsInsertRequest) (*
 		if err := tx.Commit(); err != nil {
 			return nil, fmt.Errorf("failed to commit job: %w", err)
 		}
-		if response != nil && response.ChangedCatalog.Changed() {
-			if err := syncCatalog(ctx, r.server, response.ChangedCatalog); err != nil {
+		if response != nil {
+			if response.ChangedCatalog.Changed() {
+				if err := syncCatalog(ctx, r.server, response.ChangedCatalog); err != nil {
+					return nil, err
+				}
+			}
+			if err := applyTableDefinition(ctx, r.server, response.TableDefinition); err != nil {
 				return nil, err
 			}
 		}
@@ -1894,6 +1899,51 @@ func queryProjectAndDataset(defaultDataset *bigqueryv2.DatasetReference, fallbac
 		datasetID = defaultDataset.DatasetId
 	}
 	return projectID, datasetID
+}
+
+// applyTableDefinition records metadata for DDL statements that the content
+// repository implements by rewriting the query (for example CREATE SNAPSHOT
+// TABLE ... CLONE). It runs after syncCatalog so the table already exists in
+// the in-memory catalogue.
+func applyTableDefinition(ctx context.Context, server *Server, def *internaltypes.TableDefinition) error {
+	if def == nil {
+		return nil
+	}
+	project, err := server.metaRepo.FindProject(ctx, def.ProjectID)
+	if err != nil {
+		return err
+	}
+	dataset := project.Dataset(def.DatasetID)
+	if dataset == nil {
+		return fmt.Errorf("dataset %s is not found", def.DatasetID)
+	}
+	table := dataset.Table(def.TableID)
+	if table == nil {
+		return fmt.Errorf("table %s is not found", def.TableID)
+	}
+	conn, err := server.connMgr.Connection(ctx, def.ProjectID, def.DatasetID)
+	if err != nil {
+		return err
+	}
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.RollbackIfNotCommitted()
+	if err := table.Patch(ctx, tx.Tx(), map[string]interface{}{
+		"type": string(SnapshotTableType),
+		"snapshotDefinition": map[string]interface{}{
+			"baseTableReference": map[string]interface{}{
+				"projectId": def.BaseProjectID,
+				"datasetId": def.BaseDatasetID,
+				"tableId":   def.BaseTableID,
+			},
+			"snapshotTime": def.DefinitionTime.Format(time.RFC3339Nano),
+		},
+	}); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func syncCatalog(ctx context.Context, server *Server, cat *googlesqlite.ChangedCatalog) error {
@@ -2236,6 +2286,9 @@ func (h *jobsQueryHandler) Handle(ctx context.Context, r *jobsQueryRequest) (*in
 			if err := syncCatalog(ctx, r.server, response.ChangedCatalog); err != nil {
 				return nil, err
 			}
+		}
+		if err := applyTableDefinition(ctx, r.server, response.TableDefinition); err != nil {
+			return nil, err
 		}
 	}
 	response.Rows = internaltypes.Format(response.Schema, response.Rows, r.useInt64Timestamp)
