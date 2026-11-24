@@ -4070,6 +4070,78 @@ func TestDropSnapshotTable(t *testing.T) {
 	}
 }
 
+// TestTimeTravelQuery covers #4: FOR SYSTEM_TIME AS OF resolves to the
+// newest retained snapshot at or before the requested time.
+func TestTimeTravelQuery(t *testing.T) {
+	const projectID = "test"
+	ctx := context.Background()
+	bqServer, err := server.New(server.TempStorage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bqServer.Load(server.StructSource(types.NewProject(projectID,
+		types.NewDataset("dataset1",
+			types.NewTable("source",
+				[]*types.Column{types.NewColumn("id", types.INT64)},
+				types.Data{{"id": 1}},
+			),
+		),
+	))); err != nil {
+		t.Fatal(err)
+	}
+	testServer := bqServer.TestServer()
+	defer func() {
+		testServer.Close()
+		bqServer.Stop(ctx)
+	}()
+
+	query := func(sql string) (int, map[string]any) {
+		t.Helper()
+		body := `{"query":` + strconv.Quote(sql) + `,"useLegacySql":false}`
+		return httpJSON(t, http.MethodPost, testServer.URL+"/projects/test/queries", body, nil)
+	}
+	if code, resp := query("CREATE SNAPSHOT TABLE dataset1.snap CLONE dataset1.source"); code != http.StatusOK {
+		t.Fatalf("create snapshot: %d (%v)", code, resp)
+	}
+	code, meta := httpJSON(t, http.MethodGet,
+		testServer.URL+"/projects/test/datasets/dataset1/tables/snap", "", nil)
+	if code != http.StatusOK {
+		t.Fatalf("tables.get snapshot: %d (%v)", code, meta)
+	}
+	snapshotTime := meta["snapshotDefinition"].(map[string]any)["snapshotTime"].(string)
+
+	client, err := bigquery.NewClient(ctx, projectID,
+		option.WithEndpoint(testServer.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	type row struct {
+		ID int64 `bigquery:"id"`
+	}
+	if err := client.Dataset("dataset1").Table("source").Inserter().Put(ctx, []*row{{ID: 2}}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := queryRows(t, func() map[string]any {
+		_, resp := query("SELECT id FROM dataset1.source ORDER BY id")
+		return resp
+	}()), [][]string{{"1"}, {"2"}}; !cmp.Equal(got, want) {
+		t.Fatalf("current rows = %v, want %v", got, want)
+	}
+
+	code, resp := query("SELECT id FROM dataset1.source FOR SYSTEM_TIME AS OF TIMESTAMP('" + snapshotTime + "') ORDER BY id")
+	if code != http.StatusOK {
+		t.Fatalf("time travel query: %d (%v)", code, resp)
+	}
+	if got, want := queryRows(t, resp), [][]string{{"1"}}; !cmp.Equal(got, want) {
+		t.Fatalf("historical rows = %v, want %v", got, want)
+	}
+
+	if code, _ := query("SELECT id FROM dataset1.source FOR SYSTEM_TIME AS OF TIMESTAMP('2020-01-01T00:00:00Z')"); code == http.StatusOK {
+		t.Fatal("time before retained history should error")
+	}
+}
+
 func TestUploadCSVHonorsFieldDelimiter(t *testing.T) {
 	const (
 		projectID = "test"
