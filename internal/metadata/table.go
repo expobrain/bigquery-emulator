@@ -63,6 +63,12 @@ func (t *Table) IsView() bool {
 	return typ == "VIEW" || typ == "MATERIALIZED_VIEW"
 }
 
+// IsSnapshot reports whether the table metadata describes a snapshot.
+func (t *Table) IsSnapshot() bool {
+	typ, _ := t.metadata["type"].(string)
+	return typ == "SNAPSHOT"
+}
+
 func (t *Table) Content() (*bigqueryv2.Table, error) {
 	encoded, err := json.Marshal(t.metadata)
 	if err != nil {

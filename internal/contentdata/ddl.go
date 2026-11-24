@@ -16,6 +16,12 @@ var (
 	createCloneTablePattern = regexp.MustCompile(
 		`(?is)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([^\s]+)\s+CLONE\s+([^\s]+)\s*;?\s*$`,
 	)
+	dropSnapshotTablePattern = regexp.MustCompile(
+		`(?is)^\s*DROP\s+SNAPSHOT\s+TABLE\s+(IF\s+EXISTS\s+)?([^\s]+)\s*;?\s*$`,
+	)
+	dropTablePattern = regexp.MustCompile(
+		`(?is)^\s*DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?([^\s]+)\s*;?\s*$`,
+	)
 )
 
 // splitTableReference resolves a (possibly qualified) table reference against
@@ -34,6 +40,38 @@ func splitTableReference(ref, defaultProject, defaultDataset string) (projectID,
 	default:
 		return defaultProject, defaultDataset, parts[0]
 	}
+}
+
+// ResolveTableRef resolves a table reference against the query's defaults.
+func ResolveTableRef(ref, defaultProject, defaultDataset string) (projectID, datasetID, tableID string) {
+	return splitTableReference(ref, defaultProject, defaultDataset)
+}
+
+// PlainDropTableRef returns the table reference of a DROP TABLE statement, so
+// callers that own table metadata can reject drops of snapshots (which must
+// use DROP SNAPSHOT TABLE).
+func PlainDropTableRef(query string) (string, bool) {
+	match := dropTablePattern.FindStringSubmatch(query)
+	if match == nil {
+		return "", false
+	}
+	return match[1], true
+}
+
+// rewriteDropSnapshotTable converts BigQuery's DROP SNAPSHOT TABLE statement
+// into the DROP TABLE form understood by googlesqlite. The underlying table
+// holds the snapshot's materialised data, so dropping it removes both the data
+// and (via the catalog sync in the handler) its metadata.
+func rewriteDropSnapshotTable(query string) string {
+	match := dropSnapshotTablePattern.FindStringSubmatch(query)
+	if match == nil {
+		return query
+	}
+	ifExists := ""
+	if match[1] != "" {
+		ifExists = " IF EXISTS"
+	}
+	return fmt.Sprintf("DROP TABLE%s %s", ifExists, match[2])
 }
 
 // rewriteCloneDDL converts BigQuery's CLONE DDL statements into an equivalent
