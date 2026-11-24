@@ -3865,6 +3865,78 @@ func TestInformationSchemaTablesCreationTimeIsTimestamp(t *testing.T) {
 	}
 }
 
+// TestCreateSnapshotTable covers #11: a snapshot is a queryable, stable copy
+// of the source table and exposes its definition through tables.get.
+func TestCreateSnapshotTable(t *testing.T) {
+	const projectID = "test"
+	ctx := context.Background()
+	bqServer, err := server.New(server.TempStorage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bqServer.Load(server.StructSource(types.NewProject(projectID,
+		types.NewDataset("dataset1",
+			types.NewTable("source",
+				[]*types.Column{types.NewColumn("id", types.INT64)},
+				types.Data{{"id": 1}, {"id": 2}},
+			),
+		),
+	))); err != nil {
+		t.Fatal(err)
+	}
+	testServer := bqServer.TestServer()
+	defer func() {
+		testServer.Close()
+		bqServer.Stop(ctx)
+	}()
+
+	code, resp := httpJSON(t, http.MethodPost,
+		testServer.URL+"/projects/test/queries",
+		`{"query":"CREATE SNAPSHOT TABLE dataset1.snap CLONE dataset1.source","useLegacySql":false}`, nil)
+	if code != http.StatusOK {
+		t.Fatalf("CREATE SNAPSHOT TABLE: %d (%v)", code, resp)
+	}
+
+	checkRows := func(want [][]string) {
+		t.Helper()
+		code, resp := httpJSON(t, http.MethodPost,
+			testServer.URL+"/projects/test/queries",
+			`{"query":"SELECT id FROM dataset1.snap ORDER BY id","useLegacySql":false}`, nil)
+		if code != http.StatusOK {
+			t.Fatalf("query snapshot: %d (%v)", code, resp)
+		}
+		if got := queryRows(t, resp); !cmp.Equal(got, want) {
+			t.Fatalf("snapshot rows = %v, want %v", got, want)
+		}
+	}
+	checkRows([][]string{{"1"}, {"2"}})
+
+	// The snapshot must keep its data after the source is dropped.
+	code, _ = httpJSON(t, http.MethodDelete,
+		testServer.URL+"/projects/test/datasets/dataset1/tables/source", "", nil)
+	if code != http.StatusOK {
+		t.Fatalf("drop source table: %d", code)
+	}
+	checkRows([][]string{{"1"}, {"2"}})
+
+	code, resp = httpJSON(t, http.MethodGet,
+		testServer.URL+"/projects/test/datasets/dataset1/tables/snap", "", nil)
+	if code != http.StatusOK {
+		t.Fatalf("tables.get snapshot: %d (%v)", code, resp)
+	}
+	if resp["type"] != "SNAPSHOT" {
+		t.Fatalf("snapshot type = %v, want SNAPSHOT", resp["type"])
+	}
+	def, ok := resp["snapshotDefinition"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing snapshotDefinition: %v", resp)
+	}
+	base, ok := def["baseTableReference"].(map[string]any)
+	if !ok || base["tableId"] != "source" || base["datasetId"] != "dataset1" {
+		t.Fatalf("unexpected baseTableReference: %v", def["baseTableReference"])
+	}
+}
+
 func TestUploadCSVHonorsFieldDelimiter(t *testing.T) {
 	const (
 		projectID = "test"
