@@ -3937,6 +3937,89 @@ func TestCreateSnapshotTable(t *testing.T) {
 	}
 }
 
+// TestCreateTableClone covers #2: a clone is queryable, independent of later
+// writes to the source, and exposes cloneDefinition through tables.get.
+func TestCreateTableClone(t *testing.T) {
+	const projectID = "test"
+	ctx := context.Background()
+	bqServer, err := server.New(server.TempStorage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bqServer.Load(server.StructSource(types.NewProject(projectID,
+		types.NewDataset("dataset1",
+			types.NewTable("source",
+				[]*types.Column{types.NewColumn("id", types.INT64)},
+				types.Data{{"id": 1}, {"id": 2}},
+			),
+		),
+	))); err != nil {
+		t.Fatal(err)
+	}
+	testServer := bqServer.TestServer()
+	defer func() {
+		testServer.Close()
+		bqServer.Stop(ctx)
+	}()
+
+	code, resp := httpJSON(t, http.MethodPost,
+		testServer.URL+"/projects/test/queries",
+		`{"query":"CREATE TABLE dataset1.cloned CLONE dataset1.source","useLegacySql":false}`, nil)
+	if code != http.StatusOK {
+		t.Fatalf("CREATE TABLE ... CLONE: %d (%v)", code, resp)
+	}
+
+	queryIDs := func(table string) [][]string {
+		t.Helper()
+		code, resp := httpJSON(t, http.MethodPost,
+			testServer.URL+"/projects/test/queries",
+			`{"query":"SELECT id FROM dataset1.`+table+` ORDER BY id","useLegacySql":false}`, nil)
+		if code != http.StatusOK {
+			t.Fatalf("query %s: %d (%v)", table, code, resp)
+		}
+		return queryRows(t, resp)
+	}
+	if got, want := queryIDs("cloned"), [][]string{{"1"}, {"2"}}; !cmp.Equal(got, want) {
+		t.Fatalf("initial clone rows = %v, want %v", got, want)
+	}
+
+	client, err := bigquery.NewClient(ctx, projectID,
+		option.WithEndpoint(testServer.URL), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	type cloneRow struct {
+		ID int64 `bigquery:"id"`
+	}
+	if err := client.Dataset("dataset1").Table("cloned").Inserter().Put(ctx, []*cloneRow{{ID: 3}}); err != nil {
+		t.Fatalf("insert into clone: %v", err)
+	}
+	if got, want := queryIDs("cloned"), [][]string{{"1"}, {"2"}, {"3"}}; !cmp.Equal(got, want) {
+		t.Fatalf("clone rows after insert = %v, want %v", got, want)
+	}
+	if got, want := queryIDs("source"), [][]string{{"1"}, {"2"}}; !cmp.Equal(got, want) {
+		t.Fatalf("source rows after clone insert = %v, want %v", got, want)
+	}
+
+	code, resp = httpJSON(t, http.MethodGet,
+		testServer.URL+"/projects/test/datasets/dataset1/tables/cloned", "", nil)
+	if code != http.StatusOK {
+		t.Fatalf("tables.get clone: %d (%v)", code, resp)
+	}
+	if resp["type"] != "TABLE" {
+		t.Fatalf("clone type = %v, want TABLE", resp["type"])
+	}
+	def, ok := resp["cloneDefinition"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing cloneDefinition: %v", resp)
+	}
+	base, ok := def["baseTableReference"].(map[string]any)
+	if !ok || base["tableId"] != "source" || base["datasetId"] != "dataset1" {
+		t.Fatalf("unexpected baseTableReference: %v", def["baseTableReference"])
+	}
+}
+
 func TestUploadCSVHonorsFieldDelimiter(t *testing.T) {
 	const (
 		projectID = "test"

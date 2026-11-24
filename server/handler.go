@@ -1930,17 +1930,30 @@ func applyTableDefinition(ctx context.Context, server *Server, def *internaltype
 		return err
 	}
 	defer tx.RollbackIfNotCommitted()
-	if err := table.Patch(ctx, tx.Tx(), map[string]interface{}{
-		"type": string(SnapshotTableType),
-		"snapshotDefinition": map[string]interface{}{
-			"baseTableReference": map[string]interface{}{
-				"projectId": def.BaseProjectID,
-				"datasetId": def.BaseDatasetID,
-				"tableId":   def.BaseTableID,
-			},
-			"snapshotTime": def.DefinitionTime.Format(time.RFC3339Nano),
-		},
-	}); err != nil {
+	baseRef := map[string]interface{}{
+		"projectId": def.BaseProjectID,
+		"datasetId": def.BaseDatasetID,
+		"tableId":   def.BaseTableID,
+	}
+	patch := map[string]interface{}{}
+	switch def.Kind {
+	case "SNAPSHOT":
+		patch["type"] = string(SnapshotTableType)
+		patch["snapshotDefinition"] = map[string]interface{}{
+			"baseTableReference": baseRef,
+			"snapshotTime":       def.DefinitionTime.Format(time.RFC3339Nano),
+		}
+	case "CLONE":
+		// Clones are ordinary tables in BigQuery; only the definition is
+		// added to the metadata returned by tables.get.
+		patch["cloneDefinition"] = map[string]interface{}{
+			"baseTableReference": baseRef,
+			"cloneTime":          def.DefinitionTime.Format(time.RFC3339Nano),
+		}
+	default:
+		return fmt.Errorf("unsupported table definition kind %q", def.Kind)
+	}
+	if err := table.Patch(ctx, tx.Tx(), patch); err != nil {
 		return err
 	}
 	return tx.Commit()
