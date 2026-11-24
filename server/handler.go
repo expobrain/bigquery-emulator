@@ -1747,6 +1747,9 @@ func (h *jobsInsertHandler) Handle(ctx context.Context, r *jobsInsertRequest) (*
 		return nil, fmt.Errorf("unspecified job configuration query")
 	}
 	queryProjectID, datasetID := queryProjectAndDataset(job.Configuration.Query.DefaultDataset, r.project.ID)
+	if err := rejectPlainSnapshotDrop(ctx, r.server, job.Configuration.Query.Query, queryProjectID, datasetID); err != nil {
+		return nil, err
+	}
 	conn, err := r.server.connMgr.Connection(ctx, queryProjectID, datasetID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get connection: %w", err)
@@ -1899,6 +1902,31 @@ func queryProjectAndDataset(defaultDataset *bigqueryv2.DatasetReference, fallbac
 		datasetID = defaultDataset.DatasetId
 	}
 	return projectID, datasetID
+}
+
+// rejectPlainSnapshotDrop enforces BigQuery's requirement that snapshots be
+// dropped with DROP SNAPSHOT TABLE rather than a plain DROP TABLE. The content
+// repository owns the SQL engine but not the table metadata, so the check
+// belongs here, before the DDL is forwarded and the catalog is mutated.
+func rejectPlainSnapshotDrop(ctx context.Context, server *Server, query, projectID, datasetID string) error {
+	ref, ok := contentdata.PlainDropTableRef(query)
+	if !ok {
+		return nil
+	}
+	tableProjectID, tableDatasetID, tableID := contentdata.ResolveTableRef(ref, projectID, datasetID)
+	project, err := server.metaRepo.FindProject(ctx, tableProjectID)
+	if err != nil {
+		return nil // let the normal query path report the missing project
+	}
+	dataset := project.Dataset(tableDatasetID)
+	if dataset == nil {
+		return nil
+	}
+	table := dataset.Table(tableID)
+	if table != nil && table.IsSnapshot() {
+		return errInvalidQuery("cannot drop a snapshot with DROP TABLE; use DROP SNAPSHOT TABLE")
+	}
+	return nil
 }
 
 // applyTableDefinition records metadata for DDL statements that the content
@@ -2192,6 +2220,9 @@ type jobsQueryRequest struct {
 
 func (h *jobsQueryHandler) Handle(ctx context.Context, r *jobsQueryRequest) (*internaltypes.QueryResponse, error) {
 	queryProjectID, datasetID := queryProjectAndDataset(r.queryRequest.DefaultDataset, r.project.ID)
+	if err := rejectPlainSnapshotDrop(ctx, r.server, r.queryRequest.Query, queryProjectID, datasetID); err != nil {
+		return nil, err
+	}
 	conn, err := r.server.connMgr.Connection(ctx, queryProjectID, datasetID)
 	if err != nil {
 		return nil, err

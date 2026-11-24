@@ -4020,6 +4020,56 @@ func TestCreateTableClone(t *testing.T) {
 	}
 }
 
+// TestDropSnapshotTable covers #3: dropping a snapshot removes it, IF EXISTS
+// is a no-op, and a missing snapshot without IF EXISTS is an error.
+func TestDropSnapshotTable(t *testing.T) {
+	const projectID = "test"
+	ctx := context.Background()
+	bqServer, err := server.New(server.TempStorage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bqServer.Load(server.StructSource(types.NewProject(projectID,
+		types.NewDataset("dataset1",
+			types.NewTable("source",
+				[]*types.Column{types.NewColumn("id", types.INT64)},
+				types.Data{{"id": 1}},
+			),
+		),
+	))); err != nil {
+		t.Fatal(err)
+	}
+	testServer := bqServer.TestServer()
+	defer func() {
+		testServer.Close()
+		bqServer.Stop(ctx)
+	}()
+
+	query := func(sql string) (int, map[string]any) {
+		t.Helper()
+		body := `{"query":` + strconv.Quote(sql) + `,"useLegacySql":false}`
+		return httpJSON(t, http.MethodPost, testServer.URL+"/projects/test/queries", body, nil)
+	}
+	if code, resp := query("CREATE SNAPSHOT TABLE dataset1.snap CLONE dataset1.source"); code != http.StatusOK {
+		t.Fatalf("create snapshot: %d (%v)", code, resp)
+	}
+	if code, _ := query("DROP TABLE dataset1.snap"); code == http.StatusOK {
+		t.Fatal("plain DROP TABLE must not target a snapshot")
+	}
+	if code, resp := query("DROP SNAPSHOT TABLE dataset1.snap"); code != http.StatusOK {
+		t.Fatalf("drop snapshot: %d (%v)", code, resp)
+	}
+	if code, _ := query("SELECT id FROM dataset1.snap"); code == http.StatusOK {
+		t.Fatal("snapshot is still queryable after drop")
+	}
+	if code, resp := query("DROP SNAPSHOT TABLE IF EXISTS dataset1.snap"); code != http.StatusOK {
+		t.Fatalf("DROP SNAPSHOT TABLE IF EXISTS on missing snapshot: %d (%v)", code, resp)
+	}
+	if code, _ := query("DROP SNAPSHOT TABLE dataset1.snap"); code == http.StatusOK {
+		t.Fatal("dropping a missing snapshot without IF EXISTS should fail")
+	}
+}
+
 func TestUploadCSVHonorsFieldDelimiter(t *testing.T) {
 	const (
 		projectID = "test"
