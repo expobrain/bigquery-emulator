@@ -179,8 +179,94 @@ func (r *Repository) encodeSchemaField(field *bigqueryv2.TableFieldSchema) strin
 	return elem
 }
 
+// applyDeclaredNumericParameterTypes makes the declared type of NUMERIC and
+// BIGNUMERIC query parameters visible to the analyzer. googlesqlite infers
+// parameter types from Go values; the BigQuery REST API sends every scalar
+// as a JSON string, so a declared NUMERIC would otherwise be analysed as
+// STRING. Wrapping each named occurrence in an explicit CAST preserves the
+// client's declared type while leaving the value encoding untouched.
+func applyDeclaredNumericParameterTypes(query string, params []*bigqueryv2.QueryParameter) string {
+	casts := make(map[string]string, len(params))
+	for _, param := range params {
+		if param == nil || param.ParameterType == nil || param.Name == "" {
+			continue
+		}
+		typeName := strings.ToUpper(param.ParameterType.Type)
+		isArray := typeName == "ARRAY" && param.ParameterType.ArrayType != nil
+		if isArray {
+			typeName = strings.ToUpper(param.ParameterType.ArrayType.Type)
+		}
+		var castType string
+		switch typeName {
+		case "NUMERIC", "DECIMAL":
+			castType = "NUMERIC"
+		case "BIGNUMERIC", "BIGDECIMAL":
+			castType = "BIGNUMERIC"
+		}
+		if castType == "" {
+			continue
+		}
+		if isArray {
+			// googlesqlite cannot cast ARRAY<STRING> to ARRAY<NUMERIC>
+			// directly; replace the parameter with an equivalent array
+			// whose elements are cast individually.
+			alias := "__bqem_numeric_" + strings.ToLower(param.Name)
+			castType = "ARRAY(SELECT CAST(" + alias + " AS " + castType + ") FROM UNNEST(@" + param.Name + ") AS " + alias + ")"
+		} else {
+			castType = "CAST(@" + param.Name + " AS " + castType + ")"
+		}
+		casts[strings.ToLower(param.Name)] = castType
+	}
+	if len(casts) == 0 {
+		return query
+	}
+	var b strings.Builder
+	var quote byte
+	escaped := false
+	for i := 0; i < len(query); i++ {
+		c := query[i]
+		if quote != 0 {
+			b.WriteByte(c)
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == quote:
+				quote = 0
+			}
+			continue
+		}
+		if c == '\'' || c == '"' || c == '`' {
+			quote = c
+			b.WriteByte(c)
+			continue
+		}
+		if c == '@' {
+			j := i + 1
+			for j < len(query) && isParameterNameChar(query[j]) {
+				j++
+			}
+			if j > i+1 {
+				if replacement, ok := casts[strings.ToLower(query[i+1:j])]; ok {
+					b.WriteString(replacement)
+					i = j - 1
+					continue
+				}
+			}
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
+func isParameterNameChar(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_'
+}
+
 func (r *Repository) Query(ctx context.Context, tx *connection.Tx, projectID, datasetID, query string, params []*bigqueryv2.QueryParameter) (*internaltypes.QueryResponse, error) {
 	tx.SetProjectAndDataset(projectID, datasetID)
+	query = applyDeclaredNumericParameterTypes(query, params)
 	if err := tx.ContentRepoMode(); err != nil {
 		return nil, err
 	}
@@ -314,6 +400,8 @@ func emptyTypedArray(arrayType *bigqueryv2.QueryParameterType) interface{} {
 		return []int64{}
 	case "FLOAT64", "FLOAT", "DOUBLE":
 		return []float64{}
+	case "NUMERIC", "BIGNUMERIC", "DECIMAL", "BIGDECIMAL":
+		return []string{}
 	case "BOOL", "BOOLEAN":
 		return []bool{}
 	default:

@@ -3759,6 +3759,68 @@ func TestCDCLoadOptionsAreApplied(t *testing.T) {
 	}
 }
 
+// TestNumericQueryParameter covers #8: the Python client sends scalars as
+// JSON strings with a declared NUMERIC/BIGNUMERIC type. They must be decoded
+// into a numeric value usable in arithmetic, not an untyped string.
+func TestNumericQueryParameter(t *testing.T) {
+	const projectID = "test"
+	ctx := context.Background()
+	bqServer, err := server.New(server.TempStorage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bqServer.Load(server.StructSource(types.NewProject(projectID))); err != nil {
+		t.Fatal(err)
+	}
+	testServer := bqServer.TestServer()
+	defer func() {
+		testServer.Close()
+		bqServer.Stop(ctx)
+	}()
+
+	for _, tt := range []struct {
+		name        string
+		typeName    string
+		literalType string
+		value       string
+		want        string
+	}{
+		{"NUMERIC", "NUMERIC", "NUMERIC", "123.45", "124.45"},
+		{"BIGNUMERIC", "BIGNUMERIC", "BIGNUMERIC", "12345678901234567890.5", "12345678901234567891.5"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			code, resp := httpJSON(t, http.MethodPost,
+				testServer.URL+"/projects/test/queries",
+				`{"query":"SELECT @p + `+tt.literalType+` '1' AS v","useLegacySql":false,`+
+					`"queryParameters":[{"name":"p","parameterType":{"type":"`+tt.typeName+`"},`+
+					`"parameterValue":{"value":"`+tt.value+`"}}]}`, nil)
+			if code != http.StatusOK {
+				t.Fatalf("numeric parameter query: %d (%v)", code, resp)
+			}
+			rows := queryRows(t, resp)
+			if len(rows) != 1 || rows[0][0] != tt.want {
+				t.Fatalf("got rows %v, want [[%s]]", rows, tt.want)
+			}
+		})
+	}
+
+	t.Run("array NUMERIC", func(t *testing.T) {
+		code, resp := httpJSON(t, http.MethodPost,
+			testServer.URL+"/projects/test/queries",
+			`{"query":"SELECT SUM(v) AS total FROM UNNEST(@p) AS v","useLegacySql":false,`+
+				`"queryParameters":[{"name":"p","parameterType":{"type":"ARRAY",`+
+				`"arrayType":{"type":"NUMERIC"}},`+
+				`"parameterValue":{"arrayValues":[{"value":"1.25"},{"value":"2.5"}]}}]}`, nil)
+		if code != http.StatusOK {
+			t.Fatalf("numeric array parameter query: %d (%v)", code, resp)
+		}
+		rows := queryRows(t, resp)
+		if len(rows) != 1 || rows[0][0] != "3.75" {
+			t.Fatalf("got rows %v, want [[3.75]]", rows)
+		}
+	})
+}
+
 func TestUploadCSVHonorsFieldDelimiter(t *testing.T) {
 	const (
 		projectID = "test"
